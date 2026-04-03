@@ -1,26 +1,30 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 const TARGETS = { cal: 2600, protein: 180, water: 120 };
 
 interface Entry {
+  id?: number;
+  date: string;
   time: string;
   desc: string;
   cal: number;
   protein: number;
   water: number;
-  img?: string;
   note?: string;
 }
 
-interface DayData {
-  entries: Entry[];
-}
-
 interface WeightEntry {
+  id?: number;
   date: string;
-  w: number;
+  weight: number;
 }
 
 function todayKey() {
@@ -29,32 +33,13 @@ function todayKey() {
 }
 
 function formatDate(key: string) {
+  if (!key) return '';
   const [, m, d] = key.split('-');
   return `${parseInt(m)}/${parseInt(d)}`;
 }
 
 function getTime() {
   return new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-}
-
-function getData(k: string): DayData {
-  if (typeof window === 'undefined') return { entries: [] };
-  const r = localStorage.getItem(`lgn_${k}`);
-  return r ? JSON.parse(r) : { entries: [] };
-}
-
-function saveData(k: string, data: DayData) {
-  localStorage.setItem(`lgn_${k}`, JSON.stringify(data));
-}
-
-function getWeights(): WeightEntry[] {
-  if (typeof window === 'undefined') return [];
-  const r = localStorage.getItem('lgn_weights');
-  return r ? JSON.parse(r) : [];
-}
-
-function saveWeights(w: WeightEntry[]) {
-  localStorage.setItem('lgn_weights', JSON.stringify(w));
 }
 
 function getTotals(entries: Entry[]) {
@@ -67,13 +52,9 @@ function getTotals(entries: Entry[]) {
 
 export default function Home() {
   const [currentDate, setCurrentDate] = useState('');
-const [mounted, setMounted] = useState(false);
-
-useEffect(() => {
-  setCurrentDate(todayKey());
-  setMounted(true);
-}, []);
-  const [, forceUpdate] = useState(0);
+  const [mounted, setMounted] = useState(false);
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [weights, setWeights] = useState<WeightEntry[]>([]);
   const [photoBase64, setPhotoBase64] = useState<string | null>(null);
   const [desc, setDesc] = useState('');
   const [logging, setLogging] = useState(false);
@@ -84,15 +65,43 @@ useEffect(() => {
   const photoInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const refresh = () => forceUpdate(n => n + 1);
+  useEffect(() => {
+    const today = todayKey();
+    setCurrentDate(today);
+    setMounted(true);
+    loadEntries(today);
+    loadWeights();
+  }, []);
 
-  const data = mounted ? getData(currentDate) : { entries: [] };
-  const totals = getTotals(data.entries);
-  const weights = getWeights();
+  const loadEntries = async (date: string) => {
+    const { data } = await supabase
+      .from('nutrition_logs')
+      .select('*')
+      .eq('date', date)
+      .order('created_at', { ascending: false });
+    if (data) setEntries(data);
+  };
+
+  const loadWeights = async () => {
+    const { data } = await supabase
+      .from('weight_logs')
+      .select('*')
+      .order('date', { ascending: true });
+    if (data) setWeights(data);
+  };
+
+  const navigate = (dir: number) => {
+    const d = new Date(currentDate + 'T12:00:00');
+    d.setDate(d.getDate() + dir);
+    const newDate = d.toISOString().split('T')[0];
+    setCurrentDate(newDate);
+    loadEntries(newDate);
+  };
+
+  const totals = getTotals(entries);
   const latestWeight = weights.length > 0 ? weights[weights.length - 1] : null;
   const prevWeight = weights.length > 1 ? weights[weights.length - 2] : null;
-
-  const weightDiff = latestWeight && prevWeight ? latestWeight.w - prevWeight.w : null;
+  const weightDiff = latestWeight && prevWeight ? latestWeight.weight - prevWeight.weight : null;
   const arrow = weightDiff === null ? '⚖️' : weightDiff < -0.1 ? '↓' : weightDiff > 0.1 ? '↑' : '→';
   const arrowColor = weightDiff === null ? '#666' : weightDiff < -0.1 ? '#60f090' : weightDiff > 0.1 ? '#f06060' : '#666';
 
@@ -114,31 +123,40 @@ useEffect(() => {
       note = parsed.notes || '';
     } catch { note = 'Could not estimate — logged without macros.'; }
 
-    const entry: Entry = { time: getTime(), desc, cal, protein, water: 0, note };
-    if (photoBase64) entry.img = photoBase64;
-    const dayData = getData(currentDate);
-    dayData.entries.unshift(entry);
-    saveData(currentDate, dayData);
+    await supabase.from('nutrition_logs').insert([{
+      date: currentDate,
+      log_time: getTime(),
+      desc,
+      cal,
+      protein,
+      water: 0,
+      note,
+    }]);
+
     setDesc('');
     setPhotoBase64(null);
     setAnalysisNote(note);
     setLogging(false);
-    refresh();
+    await loadEntries(currentDate);
     setTimeout(() => setAnalysisNote(''), 5000);
   };
 
-  const logWater = (oz: number) => {
-    const dayData = getData(currentDate);
-    dayData.entries.unshift({ time: getTime(), desc: 'Water', water: oz, cal: 0, protein: 0 });
-    saveData(currentDate, dayData);
-    refresh();
+  const logWater = async (oz: number) => {
+    await supabase.from('nutrition_logs').insert([{
+      date: currentDate,
+      log_time: getTime(),
+      desc: 'Water',
+      cal: 0,
+      protein: 0,
+      water: oz,
+      note: '',
+    }]);
+    await loadEntries(currentDate);
   };
 
-  const deleteEntry = (i: number) => {
-    const dayData = getData(currentDate);
-    dayData.entries.splice(i, 1);
-    saveData(currentDate, dayData);
-    refresh();
+  const deleteEntry = async (id: number) => {
+    await supabase.from('nutrition_logs').delete().eq('id', id);
+    await loadEntries(currentDate);
   };
 
   const handlePhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -149,50 +167,42 @@ useEffect(() => {
     reader.readAsDataURL(file);
   };
 
-  const navigate = (dir: number) => {
-    const d = new Date(currentDate + 'T12:00:00');
-    d.setDate(d.getDate() + dir);
-    setCurrentDate(d.toISOString().split('T')[0]);
-  };
-
-  const logWeight = () => {
+  const logWeight = async () => {
     const val = parseFloat(weightInput);
     if (!val || val < 50 || val > 500) { alert('Enter a valid weight.'); return; }
-    const ws = getWeights();
     const today = todayKey();
-    const existing = ws.findIndex(w => w.date === today);
-    if (existing >= 0) ws[existing].w = val;
-    else ws.push({ date: today, w: val });
-    ws.sort((a, b) => a.date.localeCompare(b.date));
-    saveWeights(ws);
+    const existing = weights.find(w => w.date === today);
+    if (existing) {
+      await supabase.from('weight_logs').update({ weight: val }).eq('id', existing.id);
+    } else {
+      await supabase.from('weight_logs').insert([{ date: today, weight: val }]);
+    }
     setWeightInput('');
-    refresh();
+    await loadWeights();
     setTimeout(() => drawChart(), 100);
   };
 
   const drawChart = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ws = getWeights();
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const W = canvas.width, H = canvas.height;
     ctx.clearRect(0, 0, W, H);
-    if (ws.length === 0) {
+    if (weights.length === 0) {
       ctx.fillStyle = '#444';
       ctx.font = '12px monospace';
       ctx.textAlign = 'center';
       ctx.fillText('No weigh-ins yet', W / 2, H / 2);
       return;
     }
-    const vals = ws.map(w => w.w);
+    const vals = weights.map(w => w.weight);
     const minV = Math.min(...vals) - 3, maxV = Math.max(...vals) + 3;
     const pad = { t: 16, r: 16, b: 28, l: 40 };
     const gW = W - pad.l - pad.r, gH = H - pad.t - pad.b;
-    const toX = (i: number) => pad.l + (i / Math.max(ws.length - 1, 1)) * gW;
+    const toX = (i: number) => pad.l + (i / Math.max(weights.length - 1, 1)) * gW;
     const toY = (v: number) => pad.t + (1 - (v - minV) / (maxV - minV)) * gH;
 
-    // Grid lines
     ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
       const y = pad.t + (i / 4) * gH;
@@ -202,27 +212,24 @@ useEffect(() => {
       ctx.fillText(val.toFixed(0), pad.l - 4, y + 3);
     }
 
-    // Line
     ctx.beginPath(); ctx.strokeStyle = '#f0a060'; ctx.lineWidth = 2;
-    ws.forEach((w, i) => { i === 0 ? ctx.moveTo(toX(i), toY(w.w)) : ctx.lineTo(toX(i), toY(w.w)); });
+    weights.forEach((w, i) => { i === 0 ? ctx.moveTo(toX(i), toY(w.weight)) : ctx.lineTo(toX(i), toY(w.weight)); });
     ctx.stroke();
 
-    // Fill
     ctx.beginPath();
-    ws.forEach((w, i) => { i === 0 ? ctx.moveTo(toX(i), toY(w.w)) : ctx.lineTo(toX(i), toY(w.w)); });
-    ctx.lineTo(toX(ws.length - 1), pad.t + gH);
+    weights.forEach((w, i) => { i === 0 ? ctx.moveTo(toX(i), toY(w.weight)) : ctx.lineTo(toX(i), toY(w.weight)); });
+    ctx.lineTo(toX(weights.length - 1), pad.t + gH);
     ctx.lineTo(toX(0), pad.t + gH);
     ctx.closePath();
     ctx.fillStyle = 'rgba(240,160,96,0.08)'; ctx.fill();
 
-    // Dots + labels
-    ws.forEach((w, i) => {
-      ctx.beginPath(); ctx.arc(toX(i), toY(w.w), 4, 0, Math.PI * 2);
+    weights.forEach((w, i) => {
+      ctx.beginPath(); ctx.arc(toX(i), toY(w.weight), 4, 0, Math.PI * 2);
       ctx.fillStyle = '#f0a060'; ctx.fill();
       ctx.fillStyle = '#888'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
       ctx.fillText(formatDate(w.date), toX(i), H - 6);
     });
-  }, []);
+  }, [weights]);
 
   const openGraph = () => { setShowGraph(true); setTimeout(drawChart, 100); };
 
@@ -237,12 +244,12 @@ useEffect(() => {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', paddingTop: '8px' }}>
         <div style={{ fontFamily: 'Syne, sans-serif', fontWeight: 800, fontSize: '18px', letterSpacing: '-0.5px' }}>
-        <span style={{ fontFamily: 'Comfortaa, cursive' }}>LookGood<span style={{ color: '#c8f060' }}>NakedLog</span></span>
+          <span style={{ fontFamily: 'Comfortaa, cursive' }}>LookGood<span style={{ color: '#c8f060' }}>NakedLog</span></span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <button onClick={() => navigate(-1)} style={navBtnStyle}>‹</button>
           <div style={{ fontFamily: 'Syne, sans-serif', fontWeight: 700, fontSize: '15px', color: '#c8f060', minWidth: '48px', textAlign: 'center' }}>
-          <span style={{ fontFamily: 'DM Mono, monospace', fontVariantNumeric: 'tabular-nums' }}>{formatDate(currentDate)}</span>
+            <span style={{ fontFamily: 'DM Mono, monospace', fontVariantNumeric: 'tabular-nums' }}>{formatDate(currentDate)}</span>
           </div>
           <button onClick={() => navigate(1)} style={navBtnStyle}>›</button>
         </div>
@@ -255,7 +262,7 @@ useEffect(() => {
           <div style={{ flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
               <div style={{ fontFamily: 'Syne, sans-serif', fontWeight: 800, fontSize: '28px', color: '#f0a060', lineHeight: 1 }}>
-                {latestWeight ? latestWeight.w.toFixed(1) : '—'}
+                {latestWeight ? latestWeight.weight.toFixed(1) : '—'}
               </div>
               <div style={{ fontSize: '11px', color: '#666' }}>lbs</div>
             </div>
@@ -352,14 +359,14 @@ useEffect(() => {
         {currentDate === todayKey() ? "TODAY'S LOG" : `${formatDate(currentDate)} LOG`}
       </div>
 
-      {data.entries.length === 0 ? (
+      {entries.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '24px', color: '#666', fontSize: '12px', lineHeight: 1.8 }}>Nothing logged yet.<br />Describe a meal above and hit LOG IT.</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          {data.entries.map((e, i) => (
-            <div key={i} style={{ background: '#1a1a1a', border: '1px solid #2e2e2e', borderRadius: '10px', padding: '12px', display: 'grid', gridTemplateColumns: '1fr auto', gap: '8px', alignItems: 'start' }}>
+          {entries.map((e) => (
+            <div key={e.id} style={{ background: '#1a1a1a', border: '1px solid #2e2e2e', borderRadius: '10px', padding: '12px', display: 'grid', gridTemplateColumns: '1fr auto', gap: '8px', alignItems: 'start' }}>
               <div>
-                <div style={{ fontSize: '10px', color: '#666', marginBottom: '3px' }}>{e.time}</div>
+                <div style={{ fontSize: '10px', color: '#666', marginBottom: '3px' }}>{e.log_time}</div>
                 <div style={{ fontSize: '12px', lineHeight: 1.4 }}>{e.desc || (e.water ? 'Water intake' : 'Entry')}</div>
                 <div style={{ display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' }}>
                   {e.cal > 0 && <span style={{ fontSize: '10px', padding: '2px 7px', borderRadius: '20px', background: 'rgba(200,240,96,0.12)', color: '#c8f060' }}>{e.cal} cal</span>}
@@ -369,8 +376,7 @@ useEffect(() => {
                 </div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
-                <button onClick={() => deleteEntry(i)} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '14px', padding: '2px', lineHeight: 1 }}>✕</button>
-                {e.img && <img src={e.img} alt="meal" style={{ width: '52px', height: '52px', borderRadius: '8px', objectFit: 'cover', border: '1px solid #2e2e2e' }} />}
+                <button onClick={() => deleteEntry(e.id!)} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '14px', padding: '2px', lineHeight: 1 }}>✕</button>
               </div>
             </div>
           ))}
