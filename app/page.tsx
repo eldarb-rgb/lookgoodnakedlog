@@ -13,7 +13,7 @@ const TARGETS = { cal: 2600, protein: 180, water: 120 };
 interface Entry {
   id?: number;
   date: string;
-  time: string;
+  log_time?: string;
   desc: string;
   cal: number;
   protein: number;
